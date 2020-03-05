@@ -1,0 +1,20 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 11.00
+# Visual Studio 2010
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PainterEngine_SoundLab", "PainterEngine_SoundLab\PainterEngine_SoundLab.vcxproj", "{C4F72E54-6D64-4ABF-A4C0-B0AD0B263C26}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Win32 = Debug|Win32
+		Release|Win32 = Release|Win32
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C4F72E54-6D64-4ABF-A4C0-B0AD0B263C26}.Debug|Win32.ActiveCfg = Debug|Win32
+		{C4F72E54-6D64-4ABF-A4C0-B0AD0B263C26}.Debug|Win32.Build.0 = Debug|Win32
+		{C4F72E54-6D64-4ABF-A4C0-B0AD0B263C26}.Release|Win32.ActiveCfg = Release|Win32
+		{C4F72E54-6D64-4ABF-A4C0-B0AD0B263C26}.Release|Win32.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
