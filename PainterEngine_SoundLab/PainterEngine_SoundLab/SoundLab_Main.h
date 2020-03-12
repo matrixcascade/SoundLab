@@ -1,22 +1,16 @@
 #ifndef SOUNDLAB_MAIN_H
 #define SOUNDLAB_MAIN_H
 #include "PainterEngine_Startup.h"
+#include "SoundLab_Data.h"
 
-#define PX_SOUNDLAB_WINDOW_WIDTH 1024
-#define PX_SOUNDLAB_DEFAULT_TIMEDOMAIN_SIZE 2048
-#define PX_SOUNDLAB_SOUNDANALYSIS_INDEX 0
-#define PX_SOUNDLAB_SOUNDCAPTURE_INDEX 1
-#define PX_SOUNDLAB_SOUNDCAPTURE_BLOCKSIZE 2048
-#define PX_SOUNDLAB_SOUNDCAPTURE_BLOCKCOUNT 16
-#define PX_SOUNDLAB_SOUNDCAPTURE_BLOCKWAIT  4
-#define SOUNDLAB_TRAIN_MFCC_SAMPLE_FACTOR_COUNT 24
-#define SOUNDLAB_TRAIN_MFCC_ARRAY_COUNT 128
-#define SOUBDLAB_TRAIN_TARGET_EPOCH 10000
+
+
 typedef enum
 {
 	SOUNDLAB_MAIN_STATUS_STOP,
 	SOUNDLAB_MAIN_STATUS_PLAY,
 	SOUNDLAB_MAIN_STATUS_ANALYSISING,
+	SOUNDLAB_MAIN_STATUS_EXPORTING,
 	SOUNDLAB_MAIN_STATUS_TUNING,
 	SOUNDLAB_MAIN_STATUS_RECORDING,
 	SOUNDLAB_MAIN_STATUS_ANN,
@@ -30,6 +24,7 @@ typedef enum
 	SOUNDLAB_MAIN_DISPLAY_CEPSTRUM,
 	SOUNDLAB_MAIN_DISPLAY_ADAPT,
 	SOUNDLAB_MAIN_DISPLAY_RECORDING,
+	SOUNDLAB_MAIN_DISPLAY_ANALYSISING,
 	SOUNDLAB_MAIN_DISPLAY_ANN,
 }SOUNDLAB_MAIN_DISPLAY;
 
@@ -39,12 +34,13 @@ typedef struct
 }SOUNDLAB_TRAIN_MFCC_SAMPLE;
 
 
-typedef struct  
+
+typedef enum
 {
-	px_dword magic;//sinc
-	px_double pitchshift;
-	px_double filter[PX_SOUNDLAB_WINDOW_WIDTH];
-}SOUNDLAB_FILTER_HEADER;
+	SOUNDLAB_MAIN_ADAPT_MODE_SHIFT,
+	SOUNDLAB_MAIN_ADAPT_MODE_FILTER,
+	SOUNDLAB_MAIN_ADAPT_MODE_FIXER,
+}SOUNDLAB_MAIN_ADAPT_MODE;
 
 typedef struct  
 {
@@ -62,7 +58,7 @@ typedef struct
 
 	PX_Object *root;
 	PX_Object *btn_OpenFile,*btn_Play,*btn_Record,*btn_Pause,*btn_reset,*btn_stft,*btn_spectrum,*btn_cepstrum,*btn_adapt,*btn_ann,*btn_save;
-	PX_Object *btn_AdaptApply,*btn_FilterMode,*btn_ResetAdapt,*btn_RecordFinish;
+	PX_Object *btn_AdaptApply,*btn_FilterMode,*btn_FixerMode,*btn_ShiftMode,*btn_ResetAdapt,*btn_RecordFinish;
 	PX_Object *btn_AnnReset;
 	PX_Object *SliderBar_PitchShift,*SliderBar_TimeScale;
 	PX_Object *SpectrumCursor;
@@ -72,23 +68,23 @@ typedef struct
 	PX_Object *Map_Cepstrum;
 	PX_Object *Map_Adapt;
 	PX_Object *Map_Ann;
-	PX_Object *FilterEditor;
+	PX_Object *FilterEditor,*FixEditor;
 
 	px_byte   *sourcePCM;
 	px_int    sourcePCMSize;
 
-	px_bool   bFilterMode;
+	SOUNDLAB_MAIN_ADAPT_MODE   AdaptMode;
 
-	px_double SpectrumX[PX_SOUNDLAB_WINDOW_WIDTH];
-	px_double SpectrumY[PX_SOUNDLAB_WINDOW_WIDTH];
+	px_double SpectrumX[SOUNDLAB_WINDOW_WIDTH];
+	px_double SpectrumY[SOUNDLAB_WINDOW_WIDTH];
 
-	px_double PreviewSpectrumX[PX_SOUNDLAB_WINDOW_WIDTH];
-	px_double PreviewSpectrumY[PX_SOUNDLAB_WINDOW_WIDTH];
+	px_double PreviewSpectrumX[SOUNDLAB_WINDOW_WIDTH];
+	px_double PreviewSpectrumY[SOUNDLAB_WINDOW_WIDTH];
 
-	px_double CepstrumX[PX_SOUNDLAB_WINDOW_WIDTH];
-	px_double CepstrumY[PX_SOUNDLAB_WINDOW_WIDTH];
+	px_double CepstrumX[SOUNDLAB_WINDOW_WIDTH];
+	px_double CepstrumY[SOUNDLAB_WINDOW_WIDTH];
 
-	px_double SnapshotSampleData[PX_SOUNDLAB_WINDOW_WIDTH*8];
+	px_double SnapshotSampleData[SOUNDLAB_WINDOW_WIDTH*8];
 
 
 	px_double ann_time[100];
@@ -97,6 +93,7 @@ typedef struct
 	volatile px_int   AnnSucceeded;
 	px_bool EnterTestMode;
 	px_int TestIndex;
+	px_int threshold;
 	px_double trainloss[100];
 	px_double testloss[100];
 
@@ -122,10 +119,10 @@ typedef struct
 
 	px_char MessageText[128];
 	px_char FilePath[MAX_PATH];
-	px_byte RecorderCache[PX_SOUNDLAB_SOUNDCAPTURE_BLOCKSIZE*PX_SOUNDLAB_SOUNDCAPTURE_BLOCKCOUNT*2];//16 blocks
+	px_byte RecorderCache[SOUNDLAB_SOUNDCAPTURE_BLOCKSIZE*SOUNDLAB_SOUNDCAPTURE_BLOCKCOUNT*2];//16 blocks
 	PX_SoundData recorderSoundData;
-	px_double TimeDomainDataVertical[PX_SOUNDLAB_DEFAULT_TIMEDOMAIN_SIZE],TimeDomainDataHorizontal[PX_SOUNDLAB_DEFAULT_TIMEDOMAIN_SIZE];
-	px_double PreviewTimeDomainDataVertical[PX_SOUNDLAB_WINDOW_WIDTH],PreviewTimeDomainDataHorizontal[PX_SOUNDLAB_WINDOW_WIDTH];
+	px_double TimeDomainDataVertical[SOUNDLAB_DEFAULT_TIMEDOMAIN_SIZE],TimeDomainDataHorizontal[SOUNDLAB_DEFAULT_TIMEDOMAIN_SIZE];
+	px_double PreviewTimeDomainDataVertical[SOUNDLAB_WINDOW_WIDTH],PreviewTimeDomainDataHorizontal[SOUNDLAB_WINDOW_WIDTH];
 	SOUNDLAB_MAIN_STATUS status;
 	SOUNDLAB_MAIN_DISPLAY displayMode;
 }SoundLab_Main;

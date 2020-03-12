@@ -2,6 +2,117 @@
 
 #define SOUNDLAB_DEFAULT_FRAME_COLOR 255,96,192,255
 
+static px_char SoundLab_ExportfilePath[MAX_PATH];
+
+DWORD WINAPI SoundLab_Main_ExportFeatures(LPVOID ptr)
+{
+	px_int i;
+	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
+	SOUNDLAB_FEATURE_DATA Data;
+	px_complex Frame[SOUNDLAB_WINDOW_WIDTH];
+	px_double Framed[SOUNDLAB_WINDOW_WIDTH];
+	px_double PitchShift;
+	FILE *pf;
+	px_int randSample;
+	px_int tryCount=128;
+
+	if (pMain->sourcePCMSize<SOUNDLAB_WINDOW_WIDTH*2*2)
+	{
+		goto _ERROR;
+	}
+
+	pMain->schedule=0;
+	pMain->bDone=PX_FALSE;
+
+	PX_memset(&Data,0,sizeof(Data));
+
+	PX_memcpy(&Data.magic,"sinc",4);
+
+	PX_Object_FilterEditorMapData(pMain->FilterEditor,Data.filter,200);
+	PX_Object_FilterEditorMapData(pMain->FixEditor,Data.fix,200);
+
+	PitchShift=(PX_Object_SliderBarGetValue(pMain->SliderBar_PitchShift)-50.0)/100;
+
+	if(PitchShift==0)
+	{
+		PitchShift=1;
+	}
+	else if (PitchShift>0)
+	{
+		PitchShift=1+PitchShift/5*(2.75)*10;
+	}
+	else
+	{
+		PitchShift=-PitchShift/5*(2.75)*10;
+		PitchShift=1/(1+PitchShift);
+	}
+	Data.pitchshift=PitchShift;
+
+	//MFCC
+	for (i=0;i<SOUNDLAB_FEATURE_DATA_MFCC_SIZE;i++)
+	{
+		px_int j;
+		px_int sum,pitchE;
+		px_short *PCM;
+
+		tryCount=128;
+		while (PX_TRUE)
+		{
+			randSample=(px_int)PX_randRange(0,pMain->sourcePCMSize-SOUNDLAB_WINDOW_WIDTH*2*2);
+			randSample=(randSample/4)*4;
+			PCM=(px_short *)(pMain->sourcePCM+randSample);
+
+			if (tryCount==0&&pMain->schedule==0)
+			{
+				PX_strset(pMain->lastError,"Invalid Data.");
+				goto _ERROR;
+			}
+			sum=0;
+			for (j=0;j<SOUNDLAB_WINDOW_WIDTH;j++)
+			{
+				Frame[j].re=(px_double)PCM[j*2];
+				Frame[j].im=0;
+				Framed[j]=(px_double)PCM[j*2];
+				sum+=PX_ABS(PCM[j*2]);
+			}
+			sum/=SOUNDLAB_WINDOW_WIDTH;
+			if (sum<pMain->threshold)
+			{
+				tryCount--;
+				continue;
+			}
+			pitchE=PX_PitchEstimation(Frame,SOUNDLAB_WINDOW_WIDTH,44100);
+			if (pitchE<60&&pitchE>800)
+			{
+				tryCount--;
+				continue;
+			}
+			PX_MFCCParse(&pMain->mfcc,Framed,&Data.mfcc[i]);
+			pMain->schedule=i*100.0/SOUNDLAB_FEATURE_DATA_MFCC_SIZE;
+			break;
+		}
+	}
+
+	pf=fopen(SoundLab_ExportfilePath,"wb");
+	if (!pf)
+	{
+		PX_strset(pMain->lastError,"Could not write file.");
+		goto _ERROR;
+	}
+	fwrite(&Data,1,sizeof(Data),pf);
+	fclose(pf);
+
+	pMain->lastError[0]=0;
+	PX_MessageBoxAlertOk(&pMain->messagebox,(const px_char *)L"Export Succeeded.");
+	pMain->bDone=PX_TRUE;
+	return 0;
+_ERROR:
+	PX_MessageBoxAlertOk(&pMain->messagebox,(const px_char *)L"Export Failed");
+	pMain->bDone=PX_TRUE;
+	return 0;
+}
+
+
 static px_char TuningRuntime[1024*1024*8];
 
 DWORD WINAPI SoundLab_Main_ApplyTuning(LPVOID ptr)
@@ -13,11 +124,12 @@ DWORD WINAPI SoundLab_Main_ApplyTuning(LPVOID ptr)
 	PX_Tuning Tuning1;
 	PX_Tuning Tuning2;
 	px_short *pDataU16;
-	px_double Frame1[PX_SOUNDLAB_WINDOW_WIDTH*8];
-	px_double Frame2[PX_SOUNDLAB_WINDOW_WIDTH*8];
-	px_double Frame[PX_SOUNDLAB_WINDOW_WIDTH*8];
-	px_double filter[PX_SOUNDLAB_WINDOW_WIDTH];
-
+	px_double Frame1[SOUNDLAB_WINDOW_WIDTH*8];
+	px_double Frame2[SOUNDLAB_WINDOW_WIDTH*8];
+	px_double Frame[SOUNDLAB_WINDOW_WIDTH*8];
+	px_double filter[SOUNDLAB_WINDOW_WIDTH];
+	px_double fix[SOUNDLAB_WINDOW_WIDTH];
+	
 	px_int FrameSize;
 	px_memory solveData;
 	offset=0;
@@ -64,8 +176,11 @@ DWORD WINAPI SoundLab_Main_ApplyTuning(LPVOID ptr)
 		for (i=0;i<PX_COUNTOF(filter);i++)
 		{
 			filter[i]=0;
+			fix[i]=0;
 		}
 		PX_Object_FilterEditorMapData(pMain->FilterEditor,filter,200);
+		PX_Object_FilterEditorMapData(pMain->FixEditor,fix,200);
+
 
 		PX_TuningInitialize(&mp,&Tuning1,pitchshift,timeshift,PX_NULL,filter,PX_NULL,PX_TUNING_WINDOW_SIZE_1024);
 		PX_TuningInitialize(&mp,&Tuning2,pitchshift,timeshift,PX_NULL,filter,PX_NULL,PX_TUNING_WINDOW_SIZE_1024);
@@ -76,24 +191,24 @@ DWORD WINAPI SoundLab_Main_ApplyTuning(LPVOID ptr)
 			PX_MemoryCat(&solveData,&zero0,sizeof(px_double));
 		}
 
-		while (offset<pMain->sourcePCMSize-PX_SOUNDLAB_WINDOW_WIDTH*2*2*2)
+		while (offset<pMain->sourcePCMSize-SOUNDLAB_WINDOW_WIDTH*2*2*2)
 		{
 			pDataU16=(px_short *)(pMain->sourcePCM+offset);
 			pMain->schedule=offset*1.0/pMain->sourcePCMSize*100;
 			//channel 1
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
 				Frame[i]=pDataU16[i*2]/32768.0;
 			}
 
-			FrameSize=PX_TuningFilter(&Tuning1,Frame,PX_SOUNDLAB_WINDOW_WIDTH,Frame1);
+			FrameSize=PX_TuningFilter(&Tuning1,Frame,SOUNDLAB_WINDOW_WIDTH,Frame1);
 
 			//channel 2
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
 				Frame[i]=pDataU16[i*2+1]/32768.0;
 			}
-			PX_TuningFilter(&Tuning2,Frame,PX_SOUNDLAB_WINDOW_WIDTH,Frame2);
+			PX_TuningFilter(&Tuning2,Frame,SOUNDLAB_WINDOW_WIDTH,Frame2);
 
 			for (i=0;i<FrameSize;i++)
 			{
@@ -140,7 +255,7 @@ DWORD WINAPI SoundLab_Main_ApplyTuning(LPVOID ptr)
 				val=(px_short)Frame2[i];
 				PX_MemoryCat(&solveData,&val,sizeof(px_short));
 			}
-			offset+=PX_SOUNDLAB_WINDOW_WIDTH*2*2;
+			offset+=SOUNDLAB_WINDOW_WIDTH*2*2;
 		}
 
 
@@ -162,8 +277,8 @@ DWORD WINAPI SoundLab_Main_InitializeSoundData(LPVOID ptr)
 	px_int min=-1;
 
 	px_double pmax=0;
-	px_complex frame[PX_SOUNDLAB_WINDOW_WIDTH];
-	px_double window[PX_SOUNDLAB_WINDOW_WIDTH];
+	px_complex frame[SOUNDLAB_WINDOW_WIDTH];
+	px_double window[SOUNDLAB_WINDOW_WIDTH];
 
 	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
 
@@ -190,30 +305,30 @@ DWORD WINAPI SoundLab_Main_InitializeSoundData(LPVOID ptr)
 			PX_TextureFree(&pMain->tex_Spectrum);
 		}
 
-		w=pMain->SoundData.size/2/2/PX_SOUNDLAB_WINDOW_WIDTH*4;//2 bytes 2 channels 75% overlap
-		pMain->process_memories=w*PX_SOUNDLAB_WINDOW_WIDTH/2*4;
+		w=pMain->SoundData.size/2/2/SOUNDLAB_WINDOW_WIDTH*4;//2 bytes 2 channels 75% overlap
+		pMain->process_memories=w*SOUNDLAB_WINDOW_WIDTH/2*4;
 		pMain->lastError[0]=0;
 		pMain->schedule=0;
 
-		if(!PX_TextureCreate(&pMain->Ins->runtime.mp_game,&pMain->tex_Spectrum,w,PX_SOUNDLAB_WINDOW_WIDTH/2)) 
+		if(!PX_TextureCreate(&pMain->Ins->runtime.mp_game,&pMain->tex_Spectrum,w,SOUNDLAB_WINDOW_WIDTH/2)) 
 		{
 			PX_strset(pMain->lastError,"Out Of Memory.");
 			pMain->bDone=PX_TRUE;
 			return 0;
 		}
-		PX_WindowFunction_hamming(window,PX_SOUNDLAB_WINDOW_WIDTH);
+		PX_WindowFunction_hamming(window,SOUNDLAB_WINDOW_WIDTH);
 
 		for (x=0;x<w;x++)
 		{
 			//Data Sampling 
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
-				frame[i].re=PCM16[x*2*PX_SOUNDLAB_WINDOW_WIDTH/4+i*2];//2bytes
+				frame[i].re=PCM16[x*2*SOUNDLAB_WINDOW_WIDTH/4+i*2];//2bytes
 				frame[i].im=0;
 				frame[i].re*=window[i];
 			}
-			PX_FFT(frame,frame,PX_SOUNDLAB_WINDOW_WIDTH);
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			PX_FFT(frame,frame,SOUNDLAB_WINDOW_WIDTH);
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
 				if (frame[i].re*frame[i].re+frame[i].im*frame[i].im>pmax)
 				{
@@ -233,16 +348,16 @@ DWORD WINAPI SoundLab_Main_InitializeSoundData(LPVOID ptr)
 			px_color pixel;
 
 			//Data Sampling 
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
-				frame[i].re=PCM16[x*2*PX_SOUNDLAB_WINDOW_WIDTH/4+i*2];//2bytes
+				frame[i].re=PCM16[x*2*SOUNDLAB_WINDOW_WIDTH/4+i*2];//2bytes
 				frame[i].im=0;
 				frame[i].re*=window[i];
 			}
 			//FFT
-			PX_FFT(frame,frame,PX_SOUNDLAB_WINDOW_WIDTH);
+			PX_FFT(frame,frame,SOUNDLAB_WINDOW_WIDTH);
 
-			for (y=0;y<PX_SOUNDLAB_WINDOW_WIDTH/2;y++)
+			for (y=0;y<SOUNDLAB_WINDOW_WIDTH/2;y++)
 			{
 				
 				unit=PX_log(frame[y].re*frame[y].re+frame[y].im*frame[y].im+1)/pmax;
@@ -263,10 +378,14 @@ DWORD WINAPI SoundLab_Main_InitializeSoundData(LPVOID ptr)
 	pMain->schedule=100;
 
 	PX_Object_CoordinatesSetHorizontalMin(pMain->Map_Cepstrum,55.125);
-	PX_Object_CoordinatesSetHorizontalMax(pMain->Map_Cepstrum,PX_SOUNDLAB_WINDOW_WIDTH/2);
+	PX_Object_CoordinatesSetHorizontalMax(pMain->Map_Cepstrum,SOUNDLAB_WINDOW_WIDTH/2);
 	pMain->bDone=PX_TRUE;
 	return 1;
 }
+
+
+
+
 
 px_void SoundLab_Main_Pause(PX_Object *pObject,PX_Object_Event e,px_void *ptr)
 {
@@ -299,7 +418,7 @@ px_void SoundLab_Main_Play(PX_Object *pObject,PX_Object_Event e,px_void *ptr)
 	else
 	{
 		sound=PX_SoundCreate(&pMain->SoundData,PX_TRUE);
-		pMain->Ins->soundplay.Sounds[PX_SOUNDLAB_SOUNDANALYSIS_INDEX]=sound;
+		pMain->Ins->soundplay.Sounds[SOUNDLAB_SOUNDANALYSIS_INDEX]=sound;
 		PX_SoundPlayPause(&pMain->Ins->soundplay,PX_FALSE);
 		pMain->Ins->soundplay.Sounds[0].offset=pMain->offset;
 	}
@@ -482,71 +601,22 @@ px_void SoundLab_Main_OnButtonRecordFinish(PX_Object *pObj,PX_Object_Event e,px_
 	SoundLab_Main_RecordFinish(pMain);
 }
 
-px_void SoundLab_Main_OnButtonSave(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
+px_void SoundLab_Main_OnButtonExport(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
 {
 	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
-	SOUNDLAB_FILTER_HEADER header;
-	px_double PitchShift;
-	px_char *filePath;
-	px_byte *memData;
-
-	px_int memsize,wsize;
-
-	PX_memset(&header,0,sizeof(header));
-
-	PX_memcpy(&header.magic,"sinc",4);
-
-	PX_Object_FilterEditorMapData(pMain->FilterEditor,header.filter,200);
-
-
-	PitchShift=(PX_Object_SliderBarGetValue(pMain->SliderBar_PitchShift)-50.0)/100;
-
-	if(PitchShift==0)
+	char *path=PX_SaveFileDialog("Feature(*.feature)\0*.feature");
+	if (path)
 	{
-		PitchShift=1;
-	}
-	else if (PitchShift>0)
-	{
-		PitchShift=1+PitchShift/5*(2.75)*10;
-	}
-	else
-	{
-		PitchShift=-PitchShift/5*(2.75)*10;
-		PitchShift=1/(1+PitchShift);
-	}
-	header.pitchshift=PitchShift;
-	if(!PX_ANNExport(&pMain->ann,PX_NULL,&memsize)) return;
-	memsize+=sizeof(header);
+		DWORD id;
+		PX_strset(SoundLab_ExportfilePath,path);
+		pMain->bDone=PX_FALSE;
+		PX_MessageBoxAlertOk(&pMain->messagebox,pMain->MessageText);
+		PX_ObjectSetVisible(pMain->messagebox.btn_Ok,PX_FALSE);
+		CreateThread(NULL, 0, SoundLab_Main_ExportFeatures, pMain, 0, &id);
 
-	memData=(px_byte *)MP_Malloc(&pMain->Ins->runtime.mp_game,memsize);
-
-
-	filePath=PX_SaveFileDialog("Filter File(*.Filter)\0*.filter\0");
-	if (filePath)
-	{
-		FILE *pf=fopen(filePath,"wb");
-		if (!pf)
-		{
-			goto _ERROR;
-		}
-		PX_memcpy(memData,&header,sizeof(header));
-		if(!PX_ANNExport(&pMain->ann,memData+sizeof(header),&wsize)) goto _ERROR;
-		
-		fwrite(memData,1,memsize,pf);
-		fclose(pf);
+		pMain->status=SOUNDLAB_MAIN_STATUS_EXPORTING;
+		PX_SoundPlayPause(&pMain->Ins->soundplay,PX_TRUE);
 	}
-	else
-	{
-		MP_Free(&pMain->Ins->runtime.mp_game,memData);
-		return;
-	}
-	MP_Free(&pMain->Ins->runtime.mp_game,memData);
-	PX_MessageBoxAlertOk(&pMain->messagebox,(const px_char *)L"Export Succeeded.");
-	return;
-_ERROR:
-	PX_MessageBoxAlertOk(&pMain->messagebox,(const px_char *)"Export Failed.");
-	MP_Free(&pMain->Ins->runtime.mp_game,memData);
-	return;
 }
 
 
@@ -570,19 +640,36 @@ px_void SoundLab_Main_OnButtonAdaptApply(PX_Object *pObj,PX_Object_Event e,px_vo
 px_void SoundLab_Main_OnButtonFilterMode(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
 {
 	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
-	pMain->bFilterMode=!pMain->bFilterMode;
+
+	pMain->AdaptMode=SOUNDLAB_MAIN_ADAPT_MODE_FILTER;
+}
+
+px_void SoundLab_Main_OnButtonShiftMode(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
+{
+	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
+
+	pMain->AdaptMode=SOUNDLAB_MAIN_ADAPT_MODE_SHIFT;
+}
+
+
+px_void SoundLab_Main_OnButtonFixerMode(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
+{
+	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
+
+	pMain->AdaptMode=SOUNDLAB_MAIN_ADAPT_MODE_FIXER;
 }
 
 px_void SoundLab_Main_OnButtonResetAdapt(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
 {
 	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
 	PX_Object_FilterEditorReset(pMain->FilterEditor);
+	PX_Object_FilterEditorReset(pMain->FixEditor);
 	PX_Object_SliderBarSetValue(pMain->SliderBar_PitchShift,50);
 	PX_Object_SliderBarSetValue(pMain->SliderBar_TimeScale,50);
 }
 
 
-px_void SoundLab_Main_OnTimeDomainClick(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
+px_void SoundLab_Main_OnTimeDomainlDown(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
 {
 	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
 
@@ -598,9 +685,9 @@ px_void SoundLab_Main_OnTimeDomainClick(PX_Object *pObj,PX_Object_Event e,px_voi
 		{
 			offset=0;
 		}
-		else if((px_int)offset>pMain->SoundData.size-PX_SOUNDLAB_WINDOW_WIDTH*2*2)
+		else if((px_int)offset>pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2)
 		{
-			offset=pMain->SoundData.size-PX_SOUNDLAB_WINDOW_WIDTH*2*2;
+			offset=pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2;
 		}
 
 		//4byte aligned
@@ -611,6 +698,77 @@ px_void SoundLab_Main_OnTimeDomainClick(PX_Object *pObj,PX_Object_Event e,px_voi
 
 	}
 }
+
+px_void SoundLab_Main_OnTimeDomainOffsetLeft(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
+{
+	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
+	px_int offset;
+
+	if (e.Param_char[0]!=37)
+	{
+		return;
+	}
+	if (pMain->SoundData.size==0)
+	{
+		return;
+	}
+
+	pMain->status=SOUNDLAB_MAIN_STATUS_STOP;
+	PX_SoundPlayPause(&pMain->Ins->soundplay,PX_TRUE);
+
+	offset=pMain->offset-=8;
+
+	if (offset<0)
+	{
+		offset=0;
+	}
+	else if((px_int)offset>pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2)
+	{
+		offset=pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2;
+	}
+
+	//4byte aligned
+	offset=4*(offset/4);
+
+	pMain->offset=offset;
+	pMain->Ins->soundplay.Sounds[0].offset=offset;
+}
+
+px_void SoundLab_Main_OnTimeDomainOffsetRight(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
+{
+	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
+	px_int offset;
+
+	if (e.Param_char[0]!=39)
+	{
+		return;
+	}
+	if (pMain->SoundData.size==0)
+	{
+		return;
+	}
+
+	pMain->status=SOUNDLAB_MAIN_STATUS_STOP;
+	PX_SoundPlayPause(&pMain->Ins->soundplay,PX_TRUE);
+
+	offset=pMain->offset+=8;
+
+	if (offset<0)
+	{
+		offset=0;
+	}
+	else if((px_int)offset>pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2)
+	{
+		offset=pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2;
+	}
+
+	//4byte aligned
+	offset=4*(offset/4);
+
+	pMain->offset=offset;
+	pMain->Ins->soundplay.Sounds[0].offset=offset;
+}
+
 
 px_void SoundLab_Main_OnTimeDomainWheel(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
 {
@@ -638,7 +796,7 @@ px_void SoundLab_Main_OnTimeDomainWheel(PX_Object *pObj,PX_Object_Event e,px_voi
 	}
 }
 
-px_void SoundLab_Main_OnSpectrumClick(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
+px_void SoundLab_Main_OnSpectrumldown(PX_Object *pObj,PX_Object_Event e,px_void *ptr)
 {
 	SoundLab_Main *pMain=(SoundLab_Main *)ptr;
 
@@ -648,15 +806,15 @@ px_void SoundLab_Main_OnSpectrumClick(PX_Object *pObj,PX_Object_Event e,px_void 
 		pMain->status=SOUNDLAB_MAIN_STATUS_STOP;
 		PX_SoundPlayPause(&pMain->Ins->soundplay,PX_TRUE);
 
-		offset=(px_int)(pMain->offset+(e.Param_int[0]-pMain->SpectrumCursor->x-pMain->SpectrumCursor->Width/2)*PX_SOUNDLAB_WINDOW_WIDTH);
+		offset=(px_int)(pMain->offset+(e.Param_int[0]-pMain->SpectrumCursor->x-pMain->SpectrumCursor->Width/2)*SOUNDLAB_WINDOW_WIDTH);
 
 		if (offset<0)
 		{
 			offset=0;
 		}
-		else if((px_int)offset>pMain->SoundData.size-PX_SOUNDLAB_WINDOW_WIDTH*2*2)
+		else if((px_int)offset>pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2)
 		{
-			offset=pMain->SoundData.size-PX_SOUNDLAB_WINDOW_WIDTH*2*2;
+			offset=pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2;
 		}
 		pMain->offset=offset;
 		pMain->Ins->soundplay.Sounds[0].offset=offset;
@@ -744,7 +902,7 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	pMain->displayMode=SOUNDLAB_MAIN_DISPLAY_STFT;
 	pMain->MaxPower=1;
 	pMain->FilePath[0]=0;
-	pMain->bFilterMode=PX_FALSE;
+	pMain->AdaptMode=SOUNDLAB_MAIN_ADAPT_MODE_SHIFT;
 	pMain->rotAnimationAngle=0;
 	pMain->currentAnnOffset=0;
 	pMain->sourcePCM=PX_NULL;
@@ -757,6 +915,7 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	pMain->bTest=PX_TRUE;
 	pMain->EnterTestMode=0;
 	pMain->TestIndex=0;
+	pMain->threshold=SOUNDLAB_DEFLAUT_THRESHOLD;
 
 	for (i=0;i<PX_COUNTOF(pMain->ann_time);i++)
 	{
@@ -776,7 +935,7 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 
 
 
-	PX_MFCCInitialize(&pMain->mfcc,PX_SOUNDLAB_WINDOW_WIDTH,44100,80,2000);
+	PX_MFCCInitialize(&pMain->mfcc,SOUNDLAB_WINDOW_WIDTH,44100,80,2000);
 
 	if(!PX_LoadTextureFromFile(&Ins->runtime.mp_resources,&pMain->tex_file,SOUNDLAB_PATH_FILE))return PX_FALSE;
 	if(!PX_LoadTextureFromFile(&Ins->runtime.mp_resources,&pMain->tex_play,SOUNDLAB_PATH_PLAY))return PX_FALSE;
@@ -801,7 +960,9 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 
 	pMain->root=PX_ObjectCreate(&Ins->runtime.mp_ui,PX_NULL,0,0,0,0,0,0);
 
-	
+	PX_ObjectRegisterEvent(pMain->root,PX_OBJECT_EVENT_KEYDOWN,SoundLab_Main_OnTimeDomainOffsetLeft,pMain);
+	PX_ObjectRegisterEvent(pMain->root,PX_OBJECT_EVENT_KEYDOWN,SoundLab_Main_OnTimeDomainOffsetRight,pMain);
+
 	pMain->Map_Spectrum=PX_Object_CoordinatesCreate(&Ins->runtime.mp_ui,pMain->root,0,0,Ins->runtime.width,512);
 	PX_Object_GetCoordinates(pMain->Map_Spectrum)->borderColor=PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR);
 	PX_Object_GetCoordinates(pMain->Map_Spectrum)->FontColor=PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR);
@@ -851,7 +1012,7 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	PX_Object_GetCoordinates(pMain->Map_Adapt)->borderColor=PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR);
 	PX_Object_GetCoordinates(pMain->Map_Adapt)->FontColor=PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR);
 	PX_Object_CoordinatesSetLeftVerticalMin(pMain->Map_Adapt,0);
-	PX_Object_CoordinatesSetLeftVerticalMax(pMain->Map_Adapt,1.0);
+	PX_Object_CoordinatesSetLeftVerticalMax(pMain->Map_Adapt,2.0);
 	PX_Object_CoordinatesSetHorizontalMin(pMain->Map_Adapt,0);
 	PX_Object_CoordinatesSetHorizontalMax(pMain->Map_Adapt,8613);
 	PX_Object_CoordinatesSetTitleRightShow(pMain->Map_Adapt,PX_FALSE);
@@ -879,6 +1040,17 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	data.Size=PX_COUNTOF(pMain->PreviewSpectrumX);
 	data.Visibled=PX_TRUE;
 	PX_Object_CoordinatesAddData(pMain->Map_Adapt,data);
+
+	for (i=0;i<SOUNDLAB_OVERTONE_MARK_COUNT;i++)
+	{
+		PX_Object_CoordinateFlagLine flg;
+		flg.LineWidth=1;
+		flg.XYshow= PX_OBJECT_COORDINATEFLAGLINE_XSHOW;
+		flg.X=0;
+		flg.Y=0;
+		flg.color=PX_COLOR(192,255,192,128);
+		PX_Object_CoordinatesAddCoordinateFlagLine(pMain->Map_Adapt,flg);
+	}
 
 	//////////////////////////////////////////////////////////////////////////
 	//ANN
@@ -915,6 +1087,15 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	data.Visibled=PX_TRUE;
 	PX_Object_CoordinatesAddData(pMain->Map_Ann,data);
 	//////////////////////////////////////////////////////////////////////////
+	pMain->FilterEditor=PX_Object_FilterEditorCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)(pMain->Map_Adapt->x+64),(px_int)(pMain->Map_Adapt->y+16),(px_int)(pMain->Map_Adapt->Width-128),(px_int)(pMain->Map_Adapt->Height-32),PX_OBJECT_FILTER_TYPE_dB);
+	PX_Object_FilterEditorSetOperateCount(pMain->FilterEditor,100);
+	PX_Object_FilterEditorSetRange(pMain->FilterEditor,60);
+	PX_Object_FilterEditorSetptColor(pMain->FilterEditor,PX_COLOR(255,255,192,0));
+
+	pMain->FixEditor=PX_Object_FilterEditorCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)(pMain->Map_Adapt->x+64),(px_int)(pMain->Map_Adapt->y+16),(px_int)(pMain->Map_Adapt->Width-128),(px_int)(pMain->Map_Adapt->Height-32),PX_OBJECT_FILTER_TYPE_Liner);
+	PX_Object_FilterEditorSetOperateCount(pMain->FixEditor,100);
+	PX_Object_FilterEditorSetRange(pMain->FixEditor,1.0);
+	PX_Object_FilterEditorSetptColor(pMain->FixEditor,PX_COLOR(255,0,0,192));
 
 
 	pMain->btn_AdaptApply=PX_Object_PushButtonCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)pMain->Map_Adapt->x+(px_int)pMain->Map_Adapt->Width-128,(px_int)pMain->Map_Adapt->y+16+3,64,24,"Apply",PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
@@ -923,18 +1104,31 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	PX_Object_PushButtonSetCursorColor(pMain->btn_AdaptApply,PX_COLOR(128,128,128,128));
 	PX_ObjectRegisterEvent(pMain->btn_AdaptApply,PX_OBJECT_EVENT_EXECUTE,SoundLab_Main_OnButtonAdaptApply,pMain);
 
-	pMain->btn_FilterMode=PX_Object_PushButtonCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)pMain->Map_Adapt->x+(px_int)pMain->Map_Adapt->Width-128,(px_int)pMain->Map_Adapt->y+16+3+26,64,24,"Filter",PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
-	PX_Object_PushButtonSetBorderColor(pMain->btn_FilterMode,PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
-	PX_Object_PushButtonSetBackgroundColor(pMain->btn_FilterMode,PX_COLOR(0,0,0,0));
-	PX_Object_PushButtonSetCursorColor(pMain->btn_FilterMode,PX_COLOR(128,128,128,128));
-	PX_ObjectRegisterEvent(pMain->btn_FilterMode,PX_OBJECT_EVENT_EXECUTE,SoundLab_Main_OnButtonFilterMode,pMain);
-
-	pMain->btn_ResetAdapt=PX_Object_PushButtonCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)pMain->Map_Adapt->x+(px_int)pMain->Map_Adapt->Width-128,(px_int)pMain->Map_Adapt->y+16+3+26+26,64,24,"Reset",PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
+	pMain->btn_ResetAdapt=PX_Object_PushButtonCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)pMain->Map_Adapt->x+(px_int)pMain->Map_Adapt->Width-128,(px_int)pMain->btn_AdaptApply->y+26,64,24,"Reset",PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
 	PX_Object_PushButtonSetBorderColor(pMain->btn_ResetAdapt,PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
 	PX_Object_PushButtonSetBackgroundColor(pMain->btn_ResetAdapt,PX_COLOR(0,0,0,0));
 	PX_Object_PushButtonSetCursorColor(pMain->btn_ResetAdapt,PX_COLOR(128,128,128,128));
 	PX_ObjectRegisterEvent(pMain->btn_ResetAdapt,PX_OBJECT_EVENT_EXECUTE,SoundLab_Main_OnButtonResetAdapt,pMain);
 
+	pMain->btn_FilterMode=PX_Object_PushButtonCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)pMain->Map_Adapt->x+(px_int)pMain->Map_Adapt->Width-128,(px_int)pMain->btn_ResetAdapt->y+26,64,24,"Filter",PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
+	PX_Object_PushButtonSetBorderColor(pMain->btn_FilterMode,PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
+	PX_Object_PushButtonSetBackgroundColor(pMain->btn_FilterMode,PX_COLOR(0,0,0,0));
+	PX_Object_PushButtonSetCursorColor(pMain->btn_FilterMode,PX_COLOR(128,128,128,128));
+	PX_ObjectRegisterEvent(pMain->btn_FilterMode,PX_OBJECT_EVENT_EXECUTE,SoundLab_Main_OnButtonFilterMode,pMain);
+
+	pMain->btn_FixerMode=PX_Object_PushButtonCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)pMain->Map_Adapt->x+(px_int)pMain->Map_Adapt->Width-128,(px_int)pMain->btn_FilterMode->y+26,64,24,"Fixer",PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
+	PX_Object_PushButtonSetBorderColor(pMain->btn_FixerMode,PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
+	PX_Object_PushButtonSetBackgroundColor(pMain->btn_FixerMode,PX_COLOR(0,0,0,0));
+	PX_Object_PushButtonSetCursorColor(pMain->btn_FixerMode,PX_COLOR(128,128,128,128));
+	PX_ObjectRegisterEvent(pMain->btn_FixerMode,PX_OBJECT_EVENT_EXECUTE,SoundLab_Main_OnButtonFixerMode,pMain);
+
+
+	pMain->btn_ShiftMode=PX_Object_PushButtonCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)pMain->Map_Adapt->x+(px_int)pMain->Map_Adapt->Width-128,(px_int)pMain->btn_FixerMode->y+26,64,24,"Shift",PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
+	PX_Object_PushButtonSetBorderColor(pMain->btn_ShiftMode,PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR));
+	PX_Object_PushButtonSetBackgroundColor(pMain->btn_ShiftMode,PX_COLOR(0,0,0,0));
+	PX_Object_PushButtonSetCursorColor(pMain->btn_ShiftMode,PX_COLOR(128,128,128,128));
+	PX_ObjectRegisterEvent(pMain->btn_ShiftMode,PX_OBJECT_EVENT_EXECUTE,SoundLab_Main_OnButtonShiftMode,pMain);
+	
 
 
 	pMain->SliderBar_PitchShift=PX_Object_SliderBarCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)pMain->Map_Adapt->x+(px_int)pMain->Map_Adapt->Width-128-256-16,(px_int)pMain->Map_Adapt->y+20,256,23,PX_OBJECT_SLIDERBAR_TYPE_HORIZONTAL,PX_OBJECT_SLIDERBAR_STYLE_BOX);
@@ -949,10 +1143,8 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	PX_Object_SliderBarSetMax(pMain->SliderBar_TimeScale,100);
 	PX_Object_SliderBarSetValue(pMain->SliderBar_TimeScale,50);
 
-	pMain->FilterEditor=PX_Object_FilterEditorCreate(&Ins->runtime.mp_ui,pMain->Map_Adapt,(px_int)(pMain->Map_Adapt->x+64),(px_int)(pMain->Map_Adapt->y+16),(px_int)(pMain->Map_Adapt->Width-128),(px_int)(pMain->Map_Adapt->Height-32));
-	PX_Object_FilterEditorSetOperateCount(pMain->FilterEditor,100);
-	PX_Object_FilterEditorSetRange(pMain->FilterEditor,60);
-
+	
+	
 
 	pMain->Map_TimeDomain=PX_Object_CoordinatesCreate(&Ins->runtime.mp_ui,pMain->root,0,520,Ins->runtime.width,128);
 	PX_Object_GetCoordinates(pMain->Map_TimeDomain)->borderColor=PX_COLOR(SOUNDLAB_DEFAULT_FRAME_COLOR);
@@ -963,7 +1155,7 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	PX_Object_CoordinatesSetMargin(PX_Object_GetCoordinates(pMain->Map_TimeDomain),64,64,16,16);
 	//PX_Object_CoordinatesSetStyle(pMain->Map_TimeDomain,PX_OBJECT_COORDINATES_LINEMODE_PILLAR);
 	PX_Object_GetCoordinates(pMain->Map_TimeDomain)->ScaleEnabled=PX_FALSE;
-	PX_ObjectRegisterEvent(pMain->Map_TimeDomain,PX_OBJECT_EVENT_CURSORCLICK,SoundLab_Main_OnTimeDomainClick,pMain);
+	PX_ObjectRegisterEvent(pMain->Map_TimeDomain,PX_OBJECT_EVENT_CURSORDOWN,SoundLab_Main_OnTimeDomainlDown,pMain);
 	PX_ObjectRegisterEvent(pMain->Map_TimeDomain,PX_OBJECT_EVENT_CURSORWHEEL,SoundLab_Main_OnTimeDomainWheel,pMain);
 	
 	data.Color=PX_COLOR(255,0,255,64);
@@ -984,7 +1176,7 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	PX_Object_CoordinatesSetLeftVerticalMin(pMain->Map_PreviewTimeDomain,-1);
 	PX_Object_CoordinatesSetLeftVerticalMax(pMain->Map_PreviewTimeDomain,1);
 	PX_Object_CoordinatesSetHorizontalMin(pMain->Map_PreviewTimeDomain,0);
-	PX_Object_CoordinatesSetHorizontalMax(pMain->Map_PreviewTimeDomain,PX_SOUNDLAB_WINDOW_WIDTH);
+	PX_Object_CoordinatesSetHorizontalMax(pMain->Map_PreviewTimeDomain,SOUNDLAB_WINDOW_WIDTH);
 	PX_Object_CoordinatesSetTitleRightShow(pMain->Map_PreviewTimeDomain,PX_FALSE);
 	PX_Object_CoordinatesSetMargin(PX_Object_GetCoordinates(pMain->Map_PreviewTimeDomain),64,64,16,16);
 	//PX_Object_CoordinatesSetStyle(pMain->Map_PreviewTimeDomain,PX_OBJECT_COORDINATES_LINEMODE_PILLAR);
@@ -1076,7 +1268,7 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	PX_Object_PushButtonSetCursorColor(pMain->btn_save,PX_COLOR(128,128,128,128));
 	PX_Object_PushButtonSetStyle(pMain->btn_save,PX_OBJECT_PUSHBUTTON_STYLE_ROUNDRECT);
 	PX_Object_PushButtonSetImage(pMain->btn_save,&pMain->tex_save);
-	PX_ObjectRegisterEvent(pMain->btn_save,PX_OBJECT_EVENT_EXECUTE,SoundLab_Main_OnButtonSave,pMain);
+	PX_ObjectRegisterEvent(pMain->btn_save,PX_OBJECT_EVENT_EXECUTE,SoundLab_Main_OnButtonExport,pMain);
 
 
 
@@ -1107,7 +1299,7 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 
 	pMain->SpectrumCursor=SoundLab_SpectrumCursorCreate(&Ins->runtime.mp_ui,pMain->root,pMain);
 	PX_ObjectRegisterEvent(pMain->SpectrumCursor,PX_OBJECT_EVENT_CURSORMOVE,SoundLab_SpectrumCursorOnMouseMove,pMain);
-	PX_ObjectRegisterEvent(pMain->SpectrumCursor,PX_OBJECT_EVENT_CURSORCLICK,SoundLab_Main_OnSpectrumClick,pMain);
+	PX_ObjectRegisterEvent(pMain->SpectrumCursor,PX_OBJECT_EVENT_CURSORDOWN,SoundLab_Main_OnSpectrumldown,pMain);
 
 	PX_memset(pMain->RecorderCache,0,sizeof(pMain->RecorderCache));
 	pMain->recorderSoundData.buffer=(px_byte *)pMain->RecorderCache;
@@ -1115,9 +1307,9 @@ px_bool SoundLab_Main_Initialize(PX_Instance *Ins,SoundLab_Main *pMain)
 	pMain->recorderSoundData.channel=PX_SOUND_CHANNEL_ONE;
 	pMain->recorderSoundData.mp=PX_NULL;
 	pMain->recorderWCursorByte=0;
-	Ins->soundplay.Sounds[PX_SOUNDLAB_SOUNDCAPTURE_INDEX].data=&pMain->recorderSoundData;
-	Ins->soundplay.Sounds[PX_SOUNDLAB_SOUNDCAPTURE_INDEX].loop=PX_TRUE;
-	Ins->soundplay.Sounds[PX_SOUNDLAB_SOUNDCAPTURE_INDEX].offset=0;
+	Ins->soundplay.Sounds[SOUNDLAB_SOUNDCAPTURE_INDEX].data=&pMain->recorderSoundData;
+	Ins->soundplay.Sounds[SOUNDLAB_SOUNDCAPTURE_INDEX].loop=PX_TRUE;
+	Ins->soundplay.Sounds[SOUNDLAB_SOUNDCAPTURE_INDEX].offset=0;
 
 	PX_TuningInitialize(&Ins->runtime.mp_game,&pMain->DebugTuning,1.0,1.0,PX_NULL,PX_NULL,PX_NULL,PX_TUNING_WINDOW_SIZE_1024);
 	
@@ -1221,6 +1413,26 @@ px_void SoundLab_Main_Update(SoundLab_Main *pMain,px_dword elpased)
 	{
 		switch(pMain->status)
 		{
+		case SOUNDLAB_MAIN_STATUS_EXPORTING:
+			{
+				px_char text[64];
+				px_word *pw;
+				PX_sprintf1(text,sizeof(text),"Exporting:%1.2%",PX_STRINGFORMAT_FLOAT((px_float)pMain->schedule));
+				pw=(px_word *)pMain->MessageText;
+				for (i=0;i<sizeof(pMain->MessageText)/2-1;i++)
+				{
+					pw[i]=text[i];
+					if(!text[i]) break;
+				}
+				PX_MessageBoxUpdate(&pMain->messagebox,elpased);
+				if (pMain->bDone)
+				{
+					PX_ObjectSetVisible(pMain->messagebox.btn_Ok,PX_TRUE);
+					pMain->status=SOUNDLAB_MAIN_STATUS_STOP;
+				}
+				return;
+			}
+			break;
 		case SOUNDLAB_MAIN_STATUS_ANALYSISING:
 			{
 				px_char text[64];
@@ -1412,8 +1624,8 @@ px_void SoundLab_Main_Update(SoundLab_Main *pMain,px_dword elpased)
 			{
 				px_int i;
 				px_int readsize;
-				px_short data[PX_SOUNDLAB_WINDOW_WIDTH];
-				px_double ddata[PX_SOUNDLAB_WINDOW_WIDTH];
+				px_short data[SOUNDLAB_WINDOW_WIDTH];
+				px_double ddata[SOUNDLAB_WINDOW_WIDTH];
 				px_double sum,max;
 				px_int startepoch;
 				px_double Threshold=1024;
@@ -1640,8 +1852,8 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 	if (pMain->displayMode!=SOUNDLAB_MAIN_DISPLAY_RECORDING)
 	{
 		//render TimeDomain window
-		pt_per_pix=(PX_SOUNDLAB_DEFAULT_TIMEDOMAIN_SIZE*pMain->TimeDomainDurationCount)/PX_Object_CoordinatesGetCoordinateWidth(pMain->Map_TimeDomain);
-		winW=(px_int)(PX_SOUNDLAB_WINDOW_WIDTH/pt_per_pix);
+		pt_per_pix=(SOUNDLAB_DEFAULT_TIMEDOMAIN_SIZE*pMain->TimeDomainDurationCount)/PX_Object_CoordinatesGetCoordinateWidth(pMain->Map_TimeDomain);
+		winW=(px_int)(SOUNDLAB_WINDOW_WIDTH/pt_per_pix);
 		if (winW==0)
 		{
 			winW=1;
@@ -1668,7 +1880,7 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 
 			px_int i;
 			px_dword offset;
-			px_double dframe[PX_SOUNDLAB_WINDOW_WIDTH];
+			px_double dframe[SOUNDLAB_WINDOW_WIDTH];
 			px_short *PCM16;
 			px_double max;
 			PX_MFCC_FEATURE mfccfeature;
@@ -1676,11 +1888,11 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 			PX_memset(&mfccfeature,0,sizeof(mfccfeature));
 			if (offset>0)
 			{
-				if((px_int)offset<pMain->SoundData.size-PX_SOUNDLAB_WINDOW_WIDTH*2*2)
+				if((px_int)offset<pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2)
 				{
 					PCM16=(px_short *)(pMain->SoundData.buffer+offset);
 					//Sample
-					for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+					for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 					{
 						dframe[i]=PCM16[i*2];//2bytes
 					}
@@ -1705,7 +1917,7 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 			if (pMain->SoundData.buffer)
 			{
 				oft=pMain->tex_Spectrum_renderTarget.width/2;
-				oft-=pMain->Ins->soundplay.Sounds[0].offset/2/2/(PX_SOUNDLAB_WINDOW_WIDTH/4);
+				oft-=pMain->Ins->soundplay.Sounds[0].offset/2/2/(SOUNDLAB_WINDOW_WIDTH/4);
 				PX_TextureRender(&pMain->tex_Spectrum_renderTarget,&pMain->tex_Spectrum,oft,0,PX_TEXTURERENDER_REFPOINT_LEFTTOP,PX_NULL);
 			}
 			PX_GeoDrawLine(&pMain->tex_Spectrum_renderTarget,pMain->tex_Spectrum_renderTarget.width/2,0,pMain->tex_Spectrum_renderTarget.width/2,pMain->tex_Spectrum_renderTarget.height-1,1,PX_COLOR(128,255,192,255));
@@ -1727,8 +1939,8 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 		{
 			px_int i;
 			px_dword offset;
-			px_complex frame[PX_SOUNDLAB_WINDOW_WIDTH];
-			px_double window[PX_SOUNDLAB_WINDOW_WIDTH];
+			px_complex frame[SOUNDLAB_WINDOW_WIDTH];
+			px_double window[SOUNDLAB_WINDOW_WIDTH];
 			px_double power=0,Phase=0;
 			px_short *PCM16;
 
@@ -1740,7 +1952,7 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 				PX_memset(pMain->SpectrumX,0,sizeof(pMain->SpectrumX));
 				PX_memset(pMain->SpectrumY,0,sizeof(pMain->SpectrumY));
 			}
-			else if((px_int)offset>pMain->SoundData.size-PX_SOUNDLAB_WINDOW_WIDTH*2*2)
+			else if((px_int)offset>pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2)
 			{
 				power=0;
 				PX_memset(pMain->SpectrumX,0,sizeof(pMain->SpectrumX));
@@ -1749,25 +1961,25 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 			else
 			{
 				PCM16=(px_short *)(pMain->SoundData.buffer+offset);
-				PX_WindowFunction_hamming(window,PX_SOUNDLAB_WINDOW_WIDTH);
+				PX_WindowFunction_hamming(window,SOUNDLAB_WINDOW_WIDTH);
 				//Sample
-				for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+				for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 				{
 					frame[i].re=PCM16[i*2];//2bytes
 					frame[i].im=0;
 					frame[i].re*=window[i];
 				}
-				PX_FFT(frame,frame,PX_SOUNDLAB_WINDOW_WIDTH);
+				PX_FFT(frame,frame,SOUNDLAB_WINDOW_WIDTH);
 
-				for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH/2;i++)
+				for (i=0;i<SOUNDLAB_WINDOW_WIDTH/2;i++)
 				{
-					pMain->SpectrumX[i]=i*(44100.0/PX_SOUNDLAB_WINDOW_WIDTH);
+					pMain->SpectrumX[i]=i*(44100.0/SOUNDLAB_WINDOW_WIDTH);
 					pMain->SpectrumY[i]=PX_sqrtd(frame[i].re*frame[i].re+frame[i].im*frame[i].im)/pMain->MaxPower;
 				}
 				//power=PX_sqrtd(frame[sy].re*frame[sy].re+frame[sy].im*frame[sy].im);
 				//Phase=PX_atan2(frame[sy].im,frame[sy].re);
 			}
-			PX_Object_CoordinatesGetCoordinateData(pMain->Map_Spectrum,0)->Size=PX_SOUNDLAB_WINDOW_WIDTH/2;
+			PX_Object_CoordinatesGetCoordinateData(pMain->Map_Spectrum,0)->Size=SOUNDLAB_WINDOW_WIDTH/2;
 			PX_ObjectSetVisible(pMain->Map_Spectrum,PX_TRUE);
 			PX_ObjectSetVisible(pMain->Map_TimeDomain,PX_TRUE);
 		}
@@ -1777,8 +1989,8 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 			px_int i;
 			px_dword offset;
 			px_double max;
-			px_complex frame[PX_SOUNDLAB_WINDOW_WIDTH];
-			px_double window[PX_SOUNDLAB_WINDOW_WIDTH];
+			px_complex frame[SOUNDLAB_WINDOW_WIDTH];
+			px_double window[SOUNDLAB_WINDOW_WIDTH];
 			px_double power=0,Phase=0;
 			px_short *PCM16;
 
@@ -1790,7 +2002,7 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 				PX_memset(pMain->CepstrumX,0,sizeof(pMain->CepstrumX));
 				PX_memset(pMain->CepstrumY,0,sizeof(pMain->CepstrumY));
 			}
-			else if((px_int)offset>pMain->SoundData.size-PX_SOUNDLAB_WINDOW_WIDTH*2*2)
+			else if((px_int)offset>pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2)
 			{
 				power=0;
 				PX_memset(pMain->CepstrumX,0,sizeof(pMain->CepstrumX));
@@ -1799,18 +2011,18 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 			else
 			{
 				PCM16=(px_short *)(pMain->SoundData.buffer+offset);
-				PX_WindowFunction_hamming(window,PX_SOUNDLAB_WINDOW_WIDTH);
+				PX_WindowFunction_hamming(window,SOUNDLAB_WINDOW_WIDTH);
 				//Sample
-				for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+				for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 				{
 					frame[i].re=PCM16[i*2];//2bytes
 					frame[i].im=0;
 					frame[i].re*=window[i];
 				}
 
-				PX_Cepstrum(frame,frame,PX_SOUNDLAB_WINDOW_WIDTH,PX_CEPTRUM_TYPE_REAL);
+				PX_Cepstrum(frame,frame,SOUNDLAB_WINDOW_WIDTH,PX_CEPTRUM_TYPE_REAL);
 				max=0.000000000001;
-				for (i=55;i<PX_SOUNDLAB_WINDOW_WIDTH/2;i++)
+				for (i=55;i<SOUNDLAB_WINDOW_WIDTH/2;i++)
 				{
 					if (frame[i].re>max)
 					{
@@ -1819,7 +2031,7 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 				}
 				pMain->CepstrumX[0]=0;
 				pMain->CepstrumY[0]=0;
-				for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH/2;i++)
+				for (i=0;i<SOUNDLAB_WINDOW_WIDTH/2;i++)
 				{
 					if (i<55)
 					{
@@ -1834,7 +2046,7 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 				}
 			}
 
-			PX_Object_CoordinatesGetCoordinateData(pMain->Map_Cepstrum,0)->Size=PX_SOUNDLAB_WINDOW_WIDTH;
+			PX_Object_CoordinatesGetCoordinateData(pMain->Map_Cepstrum,0)->Size=SOUNDLAB_WINDOW_WIDTH;
 			PX_ObjectSetVisible(pMain->Map_Cepstrum,PX_TRUE);
 			PX_ObjectSetVisible(pMain->Map_TimeDomain,PX_TRUE);
 		}
@@ -1842,12 +2054,13 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 	case SOUNDLAB_MAIN_DISPLAY_ADAPT:
 		{
 			px_int i;
-			px_double max=0;
-			px_double PitchShift,TimeScale;
-			px_complex Frame[PX_SOUNDLAB_WINDOW_WIDTH];
-			px_double window[PX_SOUNDLAB_WINDOW_WIDTH];
-			px_double Filter[PX_SOUNDLAB_WINDOW_WIDTH];
-			px_double resample[PX_SOUNDLAB_WINDOW_WIDTH*2];
+			px_double max=0,ampmax=0;
+			px_double PitchShift,TimeScale,Pitch;
+			px_complex Frame[SOUNDLAB_WINDOW_WIDTH];
+			px_double window[SOUNDLAB_WINDOW_WIDTH];
+			px_double Filter[SOUNDLAB_WINDOW_WIDTH];
+			px_double Fix[SOUNDLAB_WINDOW_WIDTH];
+			px_double resample[SOUNDLAB_WINDOW_WIDTH*2];
 			px_short *PCM;
 
 			//Sample Data
@@ -1864,23 +2077,41 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 				PX_memset(pMain->SnapshotSampleData,0,sizeof(pMain->SnapshotSampleData));
 			}
 
+			
+
+
 			//UI
-			if (pMain->bFilterMode)
+			switch (pMain->AdaptMode)
 			{
-				PX_ObjectSetVisible(pMain->FilterEditor,PX_TRUE);
-				PX_Object_CoordinatesShowHelpLine(pMain->Map_Adapt,PX_FALSE);
-				PX_Object_GetCoordinates(pMain->Map_Adapt)->LeftTitleShow=PX_FALSE;
-				PX_Object_GetCoordinates(pMain->Map_Adapt)->HorizontalShow=PX_FALSE;
-				PX_Object_GetCoordinates(pMain->Map_Adapt)->ShowGuides=PX_FALSE;
+			case SOUNDLAB_MAIN_ADAPT_MODE_SHIFT:
+				{
+					PX_ObjectSetVisible(pMain->FilterEditor,PX_FALSE);
+					PX_ObjectSetVisible(pMain->FixEditor,PX_FALSE);
+					PX_Object_CoordinatesShowHelpLine(pMain->Map_Adapt,PX_TRUE);
+					PX_Object_GetCoordinates(pMain->Map_Adapt)->LeftTitleShow=PX_TRUE;
+					PX_Object_GetCoordinates(pMain->Map_Adapt)->ShowGuides=PX_TRUE;
+				}
+				break;
+			case SOUNDLAB_MAIN_ADAPT_MODE_FILTER:
+				{
+					PX_ObjectSetVisible(pMain->FilterEditor,PX_TRUE);
+					PX_ObjectSetVisible(pMain->FixEditor,PX_FALSE);
+					PX_Object_CoordinatesShowHelpLine(pMain->Map_Adapt,PX_FALSE);
+					PX_Object_GetCoordinates(pMain->Map_Adapt)->LeftTitleShow=PX_FALSE;
+					PX_Object_GetCoordinates(pMain->Map_Adapt)->ShowGuides=PX_FALSE;
+				}
+				break;
+			case SOUNDLAB_MAIN_ADAPT_MODE_FIXER:
+				{
+					PX_ObjectSetVisible(pMain->FilterEditor,PX_FALSE);
+					PX_ObjectSetVisible(pMain->FixEditor,PX_TRUE);
+					PX_Object_CoordinatesShowHelpLine(pMain->Map_Adapt,PX_FALSE);
+					PX_Object_GetCoordinates(pMain->Map_Adapt)->LeftTitleShow=PX_FALSE;
+					PX_Object_GetCoordinates(pMain->Map_Adapt)->ShowGuides=PX_FALSE;
+				}
+				break;
 			}
-			else
-			{
-				PX_ObjectSetVisible(pMain->FilterEditor,PX_FALSE);
-				PX_Object_CoordinatesShowHelpLine(pMain->Map_Adapt,PX_TRUE);
-				PX_Object_GetCoordinates(pMain->Map_Adapt)->LeftTitleShow=PX_TRUE;
-				PX_Object_GetCoordinates(pMain->Map_Adapt)->HorizontalShow=PX_TRUE;
-				PX_Object_GetCoordinates(pMain->Map_Adapt)->ShowGuides=PX_TRUE;
-			}
+			
 
 
 			PitchShift=(PX_Object_SliderBarGetValue(pMain->SliderBar_PitchShift)-50.0)/100;
@@ -1916,22 +2147,23 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 			}
 			
 			PX_memset(Filter,0,sizeof(Filter));
+			PX_memset(Fix,0,sizeof(Fix));
 			PX_Object_FilterEditorMapData(pMain->FilterEditor,Filter,200);
-			
+			PX_Object_FilterEditorMapData(pMain->FixEditor,Fix,200);
 
-			PX_WindowFunction_sinc(window,PX_SOUNDLAB_WINDOW_WIDTH);
+			PX_WindowFunction_sinc(window,SOUNDLAB_WINDOW_WIDTH);
 			//source spectrum
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
 				Frame[i].re=pMain->SnapshotSampleData[i]*window[i];
 				Frame[i].im=0;
 			}
-			PX_FFT(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
+			PX_FFT(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
 
 			max=0;
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
-				Frame[i].re=PX_sqrtd(Frame[i].re*Frame[i].re+Frame[i].im+Frame[i].im)/PX_SOUNDLAB_WINDOW_WIDTH;
+				Frame[i].re=PX_sqrtd(Frame[i].re*Frame[i].re+Frame[i].im*Frame[i].im)/SOUNDLAB_WINDOW_WIDTH;
 				if (Frame[i].re>max)
 				{
 					max=Frame[i].re;
@@ -1939,111 +2171,217 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 				Frame[i].im=0;
 			}
 
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
-				pMain->SpectrumX[i]=44100.0/PX_SOUNDLAB_WINDOW_WIDTH*i;
+				pMain->SpectrumX[i]=44100.0/SOUNDLAB_WINDOW_WIDTH*i;
 				pMain->SpectrumY[i]=Frame[i].re/max;
 			}
 
 			//resample
-			PX_LinearInterpolationResample(pMain->SnapshotSampleData,resample,(px_int)((PX_SOUNDLAB_WINDOW_WIDTH*PitchShift)*2),PX_SOUNDLAB_WINDOW_WIDTH*2);
+			PX_LinearInterpolationResample(pMain->SnapshotSampleData,resample,(px_int)((SOUNDLAB_WINDOW_WIDTH*PitchShift)*2),SOUNDLAB_WINDOW_WIDTH*2);
 
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
-			{
-				Frame[i].re=resample[i]*window[i];
-				Frame[i].im=0;
-			}
-			PX_FFT(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
-
-			max=0;
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
-			{
-				Frame[i].re=PX_sqrtd(Frame[i].re*Frame[i].re+Frame[i].im+Frame[i].im)/PX_SOUNDLAB_WINDOW_WIDTH*Filter[i];
-				if (Frame[i].re>max)
-				{
-					max=Frame[i].re;
-				}
-				Frame[i].im=0;
-			}
-
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
-			{
-				pMain->PreviewSpectrumX[i]=44100.0/PX_SOUNDLAB_WINDOW_WIDTH*i;
-				pMain->PreviewSpectrumY[i]=Frame[i].re/max;
-			}
-
-
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+		
+			//rebuild time domain
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
 				pMain->PreviewTimeDomainDataHorizontal[i]=i;
 				pMain->PreviewTimeDomainDataVertical[i]=0;
 			}
 
-			//rebuild time domain
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
 				Frame[i].re=resample[i]/32768.0*window[i];
 				Frame[i].im=0;
 			}
-			PX_FFT(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
-			{
-				Frame[i].re*=Filter[i];
-				Frame[i].im*=Filter[i];
-			}
-			PX_FT_Symmetry(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
-			PX_IFFT(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
+			PX_FFT(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
 
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH/2;i++)
+			ampmax=0;
+
+			for (i=0;i<=SOUNDLAB_WINDOW_WIDTH/2;i++)
 			{
-				pMain->PreviewTimeDomainDataVertical[i]=Frame[i+PX_SOUNDLAB_WINDOW_WIDTH/2].re*window[i+PX_SOUNDLAB_WINDOW_WIDTH/2];
+				px_double amp,phase;
+
+				amp=PX_sqrtd(Frame[i].re*Frame[i].re+Frame[i].im*Frame[i].im);
+				phase=PX_atan2(Frame[i].im,Frame[i].re);
+
+				if (PX_ABS(amp)>ampmax)
+				{
+					ampmax=amp;
+				}
+				Frame[i].re=amp;
+				Frame[i].im=phase;
+
+			}
+
+			for (i=0;i<=SOUNDLAB_WINDOW_WIDTH/2;i++)
+			{
+				px_double amp,phase;
+
+				amp=Frame[i].re;
+				phase=Frame[i].im;
+
+				amp*=Filter[i];
+				amp+=Fix[i]*ampmax;
+
+				Frame[i].re=amp*PX_cosd(phase);
+				Frame[i].im=amp*PX_sind(phase);
+			}
+			
+
+			
+			PX_FT_Symmetry(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
+			PX_IFFT(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
+
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH/2;i++)
+			{
+				pMain->PreviewTimeDomainDataVertical[i]=Frame[i+SOUNDLAB_WINDOW_WIDTH/2].re*window[i+SOUNDLAB_WINDOW_WIDTH/2];
 			}
 
 			//resample2
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
-				Frame[i].re=resample[i+PX_SOUNDLAB_WINDOW_WIDTH/2]/32768.0*window[i];
+				Frame[i].re=resample[i+SOUNDLAB_WINDOW_WIDTH/2]/32768.0*window[i];
 				Frame[i].im=0;
 			}
-			PX_FFT(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
-			{
-				Frame[i].re*=Filter[i];
-				Frame[i].im*=Filter[i];
-			}
-			PX_FT_Symmetry(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
-			PX_IFFT(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
+			PX_FFT(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
+			ampmax=0;
 
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH/2;i++)
+			for (i=0;i<=SOUNDLAB_WINDOW_WIDTH/2;i++)
+			{
+				px_double amp,phase;
+
+				amp=PX_sqrtd(Frame[i].re*Frame[i].re+Frame[i].im*Frame[i].im);
+				phase=PX_atan2(Frame[i].im,Frame[i].re);
+
+				if (PX_ABS(amp)>ampmax)
+				{
+					ampmax=amp;
+				}
+				Frame[i].re=amp;
+				Frame[i].im=phase;
+
+			}
+
+			for (i=0;i<=SOUNDLAB_WINDOW_WIDTH/2;i++)
+			{
+				px_double amp,phase;
+
+				amp=Frame[i].re;
+				phase=Frame[i].im;
+
+				amp*=Filter[i];
+				amp+=Fix[i]*ampmax;
+
+				Frame[i].re=amp*PX_cosd(phase);
+				Frame[i].im=amp*PX_sind(phase);
+			}
+			PX_FT_Symmetry(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
+			PX_IFFT(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
+
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH/2;i++)
 			{
 				pMain->PreviewTimeDomainDataVertical[i]+=Frame[i].re*window[i];
 			}
 
-			for (;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
 				pMain->PreviewTimeDomainDataVertical[i]=Frame[i].re*window[i];
 			}
 
 			//resample3
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 			{
-				Frame[i].re=resample[i+PX_SOUNDLAB_WINDOW_WIDTH]/32768.0*window[i];
+				Frame[i].re=resample[i+SOUNDLAB_WINDOW_WIDTH]/32768.0*window[i];
 				Frame[i].im=0;
 			}
-			PX_FFT(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
-			{
-				Frame[i].re*=Filter[i];
-				Frame[i].im*=Filter[i];
-			}
-			PX_FT_Symmetry(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
-			PX_IFFT(Frame,Frame,PX_SOUNDLAB_WINDOW_WIDTH);
+			PX_FFT(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
 
-			for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH/2;i++)
+			ampmax=0;
+
+			for (i=0;i<=SOUNDLAB_WINDOW_WIDTH/2;i++)
 			{
-				pMain->PreviewTimeDomainDataVertical[i+PX_SOUNDLAB_WINDOW_WIDTH/2]+=Frame[i].re*window[i];
+				px_double amp,phase;
+
+				amp=PX_sqrtd(Frame[i].re*Frame[i].re+Frame[i].im*Frame[i].im);
+				phase=PX_atan2(Frame[i].im,Frame[i].re);
+
+				if (PX_ABS(amp)>ampmax)
+				{
+					ampmax=amp;
+				}
+				Frame[i].re=amp;
+				Frame[i].im=phase;
+
 			}
 
+			for (i=0;i<=SOUNDLAB_WINDOW_WIDTH/2;i++)
+			{
+				px_double amp,phase;
+
+				amp=Frame[i].re;
+				phase=Frame[i].im;
+
+				amp*=Filter[i];
+				amp+=Fix[i]*ampmax;
+
+				Frame[i].re=amp*PX_cosd(phase);
+				Frame[i].im=amp*PX_sind(phase);
+			}
+			
+
+			PX_FT_Symmetry(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
+			PX_IFFT(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
+
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH/2;i++)
+			{
+				pMain->PreviewTimeDomainDataVertical[i+SOUNDLAB_WINDOW_WIDTH/2]+=Frame[i].re*window[i];
+			}
+
+
+			//previous spectrum
+
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
+			{
+				Frame[i].re=pMain->PreviewTimeDomainDataVertical[i]*window[i];
+				Frame[i].im=0;
+			}
+			PX_FFT(Frame,Frame,SOUNDLAB_WINDOW_WIDTH);
+
+			max=0;
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
+			{
+				Frame[i].re=PX_sqrtd(Frame[i].re*Frame[i].re+Frame[i].im*Frame[i].im)/SOUNDLAB_WINDOW_WIDTH*Filter[i];
+				if (Frame[i].re>max)
+				{
+					max=Frame[i].re;
+				}
+				Frame[i].im=0;
+			}
+
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
+			{
+				pMain->PreviewSpectrumX[i]=44100.0/SOUNDLAB_WINDOW_WIDTH*i;
+				pMain->PreviewSpectrumY[i]=Frame[i].re/max;
+			}
+
+			//Pitch
+			//overtone
+			for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
+			{
+				Frame[i].re=pMain->PreviewTimeDomainDataVertical[i]*32768;
+				Frame[i].im=0;
+			}
+
+			Pitch=PX_PitchEstimation(Frame,SOUNDLAB_WINDOW_WIDTH,44100);
+			for (i=0;i<PX_Object_GetCoordinates(pMain->Map_Adapt)->vFlagLine.size;i++)
+			{
+				PX_Object_CoordinateFlagLine *pfl;
+				pfl=PX_VECTORAT(PX_Object_CoordinateFlagLine,&PX_Object_GetCoordinates(pMain->Map_Adapt)->vFlagLine,i);
+				pfl->X=Pitch*(i+1);
+			}
+
+			//others
 
 			PX_ObjectSetVisible(pMain->Map_PreviewTimeDomain,PX_TRUE);
 			PX_ObjectSetVisible(pMain->Map_Adapt,PX_TRUE);
@@ -2143,7 +2481,7 @@ px_void SoundLab_Main_ExecuteRender(px_surface *psurface,SoundLab_Main *pMain,px
 	{
 		PX_FontDrawText(psurface,72,690,pMain->FilePath,PX_COLOR(255,0,255,0),PX_FONT_ALIGN_XLEFT);
 		PX_FontDrawText(psurface,72,710,"SampleRate:44100 HZ",PX_COLOR(255,0,255,0),PX_FONT_ALIGN_XLEFT);
-		PX_sprintf1(Text,sizeof(Text),"Window Type:Hamming - %1 - 75% Overlap",PX_STRINGFORMAT_INT(PX_SOUNDLAB_WINDOW_WIDTH));
+		PX_sprintf1(Text,sizeof(Text),"Window Type:Hamming - %1 - 75% Overlap",PX_STRINGFORMAT_INT(SOUNDLAB_WINDOW_WIDTH));
 		PX_FontDrawText(psurface,72,730,Text,PX_COLOR(255,0,255,0),PX_FONT_ALIGN_XLEFT);
 	}
 	else
@@ -2194,15 +2532,15 @@ px_void  SoundLab_SpectrumCursorRender(px_surface *psurface,PX_Object *pObject,p
 	px_dword offset;
 	SoundLab_SpectrumCursor *pCursor=(SoundLab_SpectrumCursor *)pObject->pObject;
 	px_char text[64];
-	px_complex frame[PX_SOUNDLAB_WINDOW_WIDTH]={0},pitchFrame[PX_SOUNDLAB_WINDOW_WIDTH]={0};
-	px_double window[PX_SOUNDLAB_WINDOW_WIDTH];
+	px_complex frame[SOUNDLAB_WINDOW_WIDTH]={0},pitchFrame[SOUNDLAB_WINDOW_WIDTH]={0};
+	px_double window[SOUNDLAB_WINDOW_WIDTH];
 	px_int hz;
 	px_double power=0,Phase=0;
 	px_short *PCM16;
 
 	sy=(px_int)(pObject->Height-pCursor->yOffset-1);
-	hz=44100/PX_SOUNDLAB_WINDOW_WIDTH*(sy);
-	PX_WindowFunction_hamming(window,PX_SOUNDLAB_WINDOW_WIDTH);
+	hz=44100/SOUNDLAB_WINDOW_WIDTH*(sy);
+	PX_WindowFunction_hamming(window,SOUNDLAB_WINDOW_WIDTH);
 
 	
 	if (pCursor->bshow)
@@ -2213,13 +2551,13 @@ px_void  SoundLab_SpectrumCursorRender(px_surface *psurface,PX_Object *pObject,p
 		}
 		else
 		{
-			offset=pCursor->pMain->offset+(pCursor->xOffset-pCursor->pMain->tex_Spectrum_renderTarget.width/2)*PX_SOUNDLAB_WINDOW_WIDTH;
+			offset=pCursor->pMain->offset+(pCursor->xOffset-pCursor->pMain->tex_Spectrum_renderTarget.width/2)*SOUNDLAB_WINDOW_WIDTH;
 
 			if (offset<0)
 			{
 				power=0;
 			}
-			else if((px_int)offset>pCursor->pMain->SoundData.size-PX_SOUNDLAB_WINDOW_WIDTH*2*2)
+			else if((px_int)offset>pCursor->pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2)
 			{
 				power=0;
 			}
@@ -2228,19 +2566,19 @@ px_void  SoundLab_SpectrumCursorRender(px_surface *psurface,PX_Object *pObject,p
 				PCM16=(px_short *)(pCursor->pMain->SoundData.buffer+offset);
 
 				//Sample
-				for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+				for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 				{
 					frame[i].re=PCM16[i*2];//2bytes
 					frame[i].im=0;
 					frame[i].re*=window[i];
 					pitchFrame[i]=frame[i];
 				}
-				PX_FFT(frame,frame,PX_SOUNDLAB_WINDOW_WIDTH);
-				power=PX_sqrtd(frame[sy].re*frame[sy].re+frame[sy].im*frame[sy].im)/PX_SOUNDLAB_WINDOW_WIDTH*2;
+				PX_FFT(frame,frame,SOUNDLAB_WINDOW_WIDTH);
+				power=PX_sqrtd(frame[sy].re*frame[sy].re+frame[sy].im*frame[sy].im)/SOUNDLAB_WINDOW_WIDTH*2;
 				Phase=PX_atan2(frame[sy].re,-frame[sy].im);
 			}
 		}
-		pitchHz=PX_PitchEstimation(pitchFrame,PX_SOUNDLAB_WINDOW_WIDTH,44100);
+		pitchHz=PX_PitchEstimation(pitchFrame,SOUNDLAB_WINDOW_WIDTH,44100);
 
 		PX_GeoDrawRect(psurface,64+pCursor->xOffset+16,pCursor->yOffset-16,64+pCursor->xOffset+16+148,pCursor->yOffset+54,PX_COLOR(192,64,96,255));
 		PX_GeoDrawBorder(psurface,64+pCursor->xOffset+16,pCursor->yOffset-16,64+pCursor->xOffset+16+148,pCursor->yOffset+54,1,PX_COLOR(255,255,96,255));
@@ -2259,11 +2597,11 @@ px_void  SoundLab_SpectrumCursorRender(px_surface *psurface,PX_Object *pObject,p
 
 	offset=pCursor->pMain->offset;
 
-	if (offset>0&&((px_int)offset<pCursor->pMain->SoundData.size-PX_SOUNDLAB_WINDOW_WIDTH*2*2))
+	if (offset>0&&((px_int)offset<pCursor->pMain->SoundData.size-SOUNDLAB_WINDOW_WIDTH*2*2))
 	{
 		PCM16=(px_short *)(pCursor->pMain->SoundData.buffer+offset);
 		//Sample
-		for (i=0;i<PX_SOUNDLAB_WINDOW_WIDTH;i++)
+		for (i=0;i<SOUNDLAB_WINDOW_WIDTH;i++)
 		{
 			pitchFrame[i].re=PCM16[i*2];//2bytes
 			pitchFrame[i].im=0;
@@ -2272,10 +2610,10 @@ px_void  SoundLab_SpectrumCursorRender(px_surface *psurface,PX_Object *pObject,p
 	}
 	
 
-	pitchHz=PX_PitchEstimation(pitchFrame,PX_SOUNDLAB_WINDOW_WIDTH,44100);
+	pitchHz=PX_PitchEstimation(pitchFrame,SOUNDLAB_WINDOW_WIDTH,44100);
 	if (pitchHz)
 	{
-		sy=pitchHz/(44100/PX_SOUNDLAB_WINDOW_WIDTH);
+		sy=pitchHz/(44100/SOUNDLAB_WINDOW_WIDTH);
 		for (i=1;pitchHz*i<=3300&&sy*i<pCursor->pMain->tex_Spectrum_renderTarget.height;i++)
 		{
 			PX_GeoDrawSolidCircle(psurface,54,8+pCursor->pMain->tex_Spectrum_renderTarget.height-1-sy*i,6,PX_COLOR(255,192,64,255));
